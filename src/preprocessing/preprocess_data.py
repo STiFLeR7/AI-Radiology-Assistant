@@ -1,39 +1,28 @@
-import os
 import h5py
+import os
 import numpy as np
-from scipy.ndimage import rotate
-import matplotlib.pyplot as plt
 
-# Normalize data
-def normalize_data(data):
-    return (data - np.min(data)) / (np.max(data) - np.min(data))
-
-# Augment data with rotation
-def augment_data(data, angle=15):
-    return rotate(data, angle=angle, reshape=False)
-
-# Preprocess and save data
-def preprocess_and_save(input_path, output_path):
-    os.makedirs(output_path, exist_ok=True)
+def preprocess_and_save(input_path, output_dir):
+    # Open the .h5 file
     with h5py.File(input_path, 'r') as f:
-        data = f['data'][:]
-        normalized_data = normalize_data(data)
-        augmented_data = augment_data(normalized_data)
+        # Access the 'image' dataset
+        images = f['image'][:]  # Replace 'image' with 'mask' if needed
+        
+        # (Optional) Normalize the data
+        images = images / np.max(images)  # Normalize to [0, 1]
 
-        # Save normalized and augmented data
-        np.save(os.path.join(output_path, 'normalized.npy'), normalized_data)
-        np.save(os.path.join(output_path, 'augmented.npy'), augmented_data)
+        # Save preprocessed images as .npy files
+        for i, image in enumerate(images):
+            output_path = os.path.join(output_dir, f"image_{i}.npy")
+            np.save(output_path, image)
+            print(f"Saved preprocessed image: {output_path}")
 
-        print(f"Processed data saved in {output_path}")
+# Paths
+input_h5 = 'D:/AI-Radiology-Assistant/data/raw/BraTS2020_training_data/volume_1_slice_0.h5'
+output_dir = 'data/processed'
 
-# Example usage
-if __name__ == "__main__":
-    input_h5 = 'data/raw/BraTS2020_training_data/volume_1_slice_0.h5'
-    output_dir = 'data/processed/sample/'
-    preprocess_and_save(input_h5, output_dir)
+# Ensure output directory exists
+os.makedirs(output_dir, exist_ok=True)
 
-    # Visualize processed data
-    data = np.load(os.path.join(output_dir, 'augmented.npy'))
-    plt.imshow(data, cmap='gray')
-    plt.title('Augmented MRI Slice')
-    plt.show()
+# Preprocess and save
+preprocess_and_save(input_h5, output_dir)
