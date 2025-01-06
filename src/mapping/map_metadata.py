@@ -18,18 +18,14 @@ def map_metadata(metadata_path, h5_folder, output_file):
 
     # Iterate through the rows of the metadata
     for _, row in metadata.iterrows():
-        subject_id = row['BraTS_2020_subject_ID']  # Adjusted to match your column
-        slices = row['HGG/LGG']  # Adjusted to match your column
-        target = row['MGMT_value']  # Adjusted to match your column
+        slice_path = row['slice_path']  # Path to the slice
+        target = row['target']  # Target value
 
-        # Construct the H5 file path
-        h5_file = os.path.join(h5_folder, f"{subject_id}.h5")
-
-        # Check if the file exists
-        if os.path.exists(h5_file):
-            mapping.append({'file_path': h5_file, 'target': target})
+        # Check if the slice file exists
+        if os.path.exists(slice_path):
+            mapping.append({'file_path': slice_path, 'target': target})
         else:
-            print(f"Warning: H5 file for {subject_id} not found in {h5_folder}")
+            print(f"Warning: Slice file not found: {slice_path}")
 
     # Convert the mapping to a DataFrame and save as CSV
     mapping_df = pd.DataFrame(mapping)
@@ -38,8 +34,8 @@ def map_metadata(metadata_path, h5_folder, output_file):
 
 # Main script execution
 if __name__ == "__main__":
-    metadata_file = "data/raw/meta_data.csv"  # Path to the metadata file
-    h5_folder = "data/raw/BraTS2020_training_data"  # Path to the folder containing H5 files
+    metadata_file = "data/raw/updated_meta_data.csv"  # Path to the metadata file
+    h5_folder = "data/raw/BraTS2020_training_data"  # Path to the folder containing H5 files (not used here)
     output_file = "data/processed/mapped_metadata.csv"  # Path to save the mapping CSV
 
     map_metadata(metadata_file, h5_folder, output_file)
