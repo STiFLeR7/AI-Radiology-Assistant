@@ -1,134 +1,126 @@
 import os
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, accuracy_score
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from PIL import Image
 
-# Define Dataset
-# Define Dataset
-class BraTSDataset(Dataset):
-    def __init__(self, metadata_csv, transform=None):
-        """
-        Initialize the dataset.
-
-        Args:
-            metadata_csv (str): Path to the metadata CSV file.
-            transform (callable, optional): Optional transform to be applied to each sample.
-        """
-        self.data = pd.read_csv(metadata_csv)
+# Dataset Class
+class ChestXrayDataset(Dataset):
+    def __init__(self, metadata_csv, img_dir, transform=None):
+        self.metadata = pd.read_csv(metadata_csv)
+        self.img_dir = img_dir
         self.transform = transform
 
+        # Map the 'finding' column to numeric labels
+        self.metadata['label'] = self.metadata['finding'].astype('category').cat.codes
+        self.label_mapping = dict(enumerate(self.metadata['finding'].astype('category').cat.categories))
+
     def __len__(self):
-        return len(self.data)
+        return len(self.metadata)
 
     def __getitem__(self, idx):
-        """
-        Get a single data point.
+        img_path = os.path.join(self.img_dir, self.metadata.iloc[idx]['filename'])
+        image = Image.open(img_path).convert("RGB")
+        label = self.metadata.iloc[idx]['label']  # Numeric label for the finding
 
-        Args:
-            idx (int): Index of the data point.
-
-        Returns:
-            tuple: (image, target) where image is the input image tensor and target is the label tensor.
-        """
-        row = self.data.iloc[idx]
-        image_path = row['slice_path']  # Adjust column name if necessary
-        target = row['target']
-
-        # Load the image (assuming .npy format for slices)
-        image = np.load(image_path)  # Replace with appropriate image loading if needed
         if self.transform:
             image = self.transform(image)
 
-        return torch.tensor(image, dtype=torch.float32).unsqueeze(0), torch.tensor(target, dtype=torch.long)
-
-
-# Define Model (example: simple CNN)
-class SimpleCNN(nn.Module):
-    def __init__(self):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(64 * 64 * 64, 128)  # Adjust based on your image dimensions
-        self.fc2 = nn.Linear(128, 2)
-
-    def forward(self, x):
-        x = torch.relu(self.conv1(x))
-        x = torch.relu(self.conv2(x))
-        x = torch.flatten(x, 1)
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        return image, label
 
 # Training Function
-def train_model(train_loader, val_loader, model, criterion, optimizer, num_epochs, device):
-    model.to(device)
+def train_model(model, criterion, optimizer, train_loader, val_loader, device, num_epochs=10):
     for epoch in range(num_epochs):
+        print(f"Epoch {epoch+1}/{num_epochs}")
         model.train()
-        train_loss = 0
-        correct = 0
-        total = 0
-        for images, targets in train_loader:
-            images, targets = images.to(device), targets.to(device)
+        running_loss = 0.0
+
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+
             optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, targets)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
+            running_loss += loss.item()
 
-        train_acc = 100. * correct / total
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {train_loss:.4f}, Accuracy: {train_acc:.2f}%")
+        print(f"Training Loss: {running_loss / len(train_loader)}")
 
-        # Validation
+        # Validation phase
         model.eval()
-        val_loss = 0
-        correct = 0
-        total = 0
+        val_accuracy = 0.0
+        val_predictions = []
+        val_labels = []
         with torch.no_grad():
-            for images, targets in val_loader:
-                images, targets = images.to(device), targets.to(device)
-                outputs = model(images)
-                loss = criterion(outputs, targets)
-                val_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += targets.size(0)
-                correct += predicted.eq(targets).sum().item()
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+                val_predictions.extend(preds.cpu().numpy())
+                val_labels.extend(labels.cpu().numpy())
 
-        val_acc = 100. * correct / total
-        print(f"Validation Loss: {val_loss:.4f}, Accuracy: {val_acc:.2f}%")
+        val_accuracy = accuracy_score(val_labels, val_predictions)
+        print(f"Validation Accuracy: {val_accuracy}")
 
     return model
 
-# Main
+# Main Execution
 if __name__ == "__main__":
-    metadata_csv = "D:/AI-Radiology-Assistant/data/processed/mapped_metadata.csv"
-    save_model_path = "D:/AI-Radiology-Assistant/models/best_model.pth"
-    batch_size = 32
-    num_epochs = 10
-    learning_rate = 0.001
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Paths
+    metadata_csv = "data/processed/processed_metadata.csv"
+    img_dir = "data/processed/images"
+    model_save_path = "models/chest_xray_model.pth"
 
-    # Dataset and Dataloaders
-    dataset = BraTSDataset(metadata_csv)
-    train_data, val_data = train_test_split(dataset, test_size=0.2, random_state=42)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False)
+    # Device Configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Model, Loss, Optimizer
-    model = SimpleCNN()
+    # Transforms
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    # Dataset and DataLoader
+    dataset = ChestXrayDataset(metadata_csv, img_dir, transform)
+    train_indices, val_indices = train_test_split(
+        range(len(dataset)), 
+        test_size=0.2, 
+        stratify=dataset.metadata['label'], 
+        random_state=42
+    )
+
+    train_loader = DataLoader(
+        torch.utils.data.Subset(dataset, train_indices), 
+        batch_size=16, 
+        shuffle=True
+    )
+    val_loader = DataLoader(
+        torch.utils.data.Subset(dataset, val_indices), 
+        batch_size=16, 
+        shuffle=False
+    )
+
+    # Model
+    model = models.resnet18(pretrained=True)
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, len(dataset.metadata['label'].unique()))  # Adjust output layer for classes
+    model = model.to(device)
+
+    # Loss Function and Optimizer
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    # Train the Model
-    trained_model = train_model(train_loader, val_loader, model, criterion, optimizer, num_epochs, device)
+    # Train Model
+    model = train_model(model, criterion, optimizer, train_loader, val_loader, device, num_epochs=10)
 
-    # Save the Model
-    torch.save(trained_model.state_dict(), save_model_path)
-    print(f"Model saved to {save_model_path}")
+    # Save Model
+    os.makedirs("models", exist_ok=True)
+    torch.save(model.state_dict(), model_save_path)
+    print(f"Model saved to {model_save_path}")
