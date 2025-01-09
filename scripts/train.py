@@ -1,97 +1,80 @@
 import os
 import torch
 import torch.nn as nn
-from torch.optim import Adam
+import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import models, transforms
-from sklearn.metrics import classification_report, confusion_matrix
+from torchvision import transforms, models
+from sklearn.model_selection import train_test_split
 from collections import Counter
-import seaborn as sns
+from tqdm import tqdm
 import pandas as pd
-import matplotlib.pyplot as plt
+from chest_xray_dataset import ChestXrayDataset
 
-from src.dataset import ChestXRayDataset  # Assuming this dataset class exists
+# Paths
+DATA_PATH = r"D:/AI-Radiology-Assistant/data/raw/"
+metadata = pd.read_csv(os.path.join(DATA_PATH, "metadata.csv"))
+MODEL_PATH = "models/chest_xray_model.pth"
+os.makedirs("models", exist_ok=True)
 
-# Hyperparameters
-BATCH_SIZE = 16
-LEARNING_RATE = 0.001
-WEIGHT_DECAY = 1e-4
-NUM_EPOCHS = 10
-MODEL_SAVE_PATH = "models/chest_xray_model.pth"
-
-# Device configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Data transformations (with augmentation for training)
-train_transforms = transforms.Compose([
+# Data Augmentation and Preprocessing
+train_transform = transforms.Compose([
     transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.RandomRotation(15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485], std=[0.229])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-val_transforms = transforms.Compose([
+val_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485], std=[0.229])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
 # Load metadata
-metadata_path = "data/processed/processed_metadata.csv"
-metadata = pd.read_csv(metadata_path)
+metadata = pd.read_csv(os.path.join(DATA_PATH, "metadata.csv"))
+metadata['encoded_label'] = metadata['finding'].astype('category').cat.codes
 
-# Class names
-class_names = metadata['finding'].unique().tolist()
+# Split data
+train_data, val_data = train_test_split(metadata, test_size=0.2, stratify=metadata['encoded_label'], random_state=42)
 
-# Dataset and DataLoaders
-train_metadata = metadata.sample(frac=0.8, stratify=metadata['finding'], random_state=42)
-val_metadata = metadata.drop(train_metadata.index)
+# Datasets and Dataloaders
+train_dataset = ChestXrayDataset(metadata=train_data, img_dir=os.path.join(DATA_PATH, "images"), transform=train_transform)
+val_dataset = ChestXrayDataset(metadata=val_data, img_dir=os.path.join(DATA_PATH, "images"), transform=val_transform)
 
-train_dataset = ChestXRayDataset(train_metadata, transforms=train_transforms)
-val_dataset = ChestXRayDataset(val_metadata, transforms=val_transforms)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+# Model setup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = models.resnet18(weights="IMAGENET1K_V1")
+model.fc = nn.Linear(model.fc.in_features, len(metadata['encoded_label'].unique()))
+model = model.to(device)
 
-# Define the model
-class ModifiedResNet(nn.Module):
-    def __init__(self):
-        super(ModifiedResNet, self).__init__()
-        self.resnet = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-        num_ftrs = self.resnet.fc.in_features
-        self.resnet.fc = nn.Sequential(
-            nn.Dropout(0.5),  # Dropout to prevent overfitting
-            nn.Linear(num_ftrs, len(class_names))
-        )
-
-    def forward(self, x):
-        return self.resnet(x)
-
-model = ModifiedResNet().to(device)
-
-# Loss and optimizer
+# Loss function and optimizer
 criterion = nn.CrossEntropyLoss()
-optimizer = Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Training function
-def train_model(model, criterion, optimizer, train_loader, val_loader, device, num_epochs):
+def train_model(model, criterion, optimizer, train_loader, val_loader, device, num_epochs=10):
+    best_val_acc = 0.0
     for epoch in range(num_epochs):
-        print(f"Epoch {epoch + 1}/{num_epochs}\n{'-' * 10}")
+        print(f"Epoch {epoch + 1}/{num_epochs}")
+        print("-" * 10)
         
         # Training phase
         model.train()
-        running_loss, running_corrects = 0.0, 0
-        
-        for inputs, labels in train_loader:
+        running_loss = 0.0
+        running_corrects = 0
+        for inputs, labels in tqdm(train_loader):
             inputs, labels = inputs.to(device), labels.to(device)
-            
             optimizer.zero_grad()
             outputs = model(inputs)
             _, preds = torch.max(outputs, 1)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            
             running_loss += loss.item() * inputs.size(0)
             running_corrects += torch.sum(preds == labels.data)
         
@@ -101,53 +84,27 @@ def train_model(model, criterion, optimizer, train_loader, val_loader, device, n
         
         # Validation phase
         model.eval()
-        val_loss, val_corrects = 0.0, 0
-        
+        val_loss = 0.0
+        val_corrects = 0
         with torch.no_grad():
-            for inputs, labels in val_loader:
+            for inputs, labels in tqdm(val_loader):
                 inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
                 _, preds = torch.max(outputs, 1)
                 loss = criterion(outputs, labels)
-                
                 val_loss += loss.item() * inputs.size(0)
                 val_corrects += torch.sum(preds == labels.data)
         
-        val_loss = val_loss / len(val_loader.dataset)
+        val_loss /= len(val_loader.dataset)
         val_acc = val_corrects.double() / len(val_loader.dataset)
         print(f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
         
-        # Save the model
-        if epoch == num_epochs - 1:
-            torch.save(model.state_dict(), MODEL_SAVE_PATH)
-            print(f"Model saved to {MODEL_SAVE_PATH}")
-
-# Evaluate function
-def evaluate_model(model, dataloader, device):
-    model.eval()
-    all_preds, all_labels = [], []
-    
-    with torch.no_grad():
-        for inputs, labels in dataloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-    
-    print("Classification Report:")
-    print(classification_report(all_labels, all_preds, target_names=class_names))
-    
-    cm = confusion_matrix(all_labels, all_preds)
-    plt.figure(figsize=(10, 7))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
-    plt.xlabel("Predicted")
-    plt.ylabel("Actual")
-    plt.title("Confusion Matrix")
-    plt.show()
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), MODEL_PATH)
+            print(f"Model saved to {MODEL_PATH}")
+    return model
 
 # Train the model
-train_model(model, criterion, optimizer, train_loader, val_loader, device, num_epochs=NUM_EPOCHS)
-
-# Evaluate the model
-evaluate_model(model, val_loader, device)
+model = train_model(model, criterion, optimizer, train_loader, val_loader, device, num_epochs=10)
