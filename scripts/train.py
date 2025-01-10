@@ -1,118 +1,98 @@
 import os
+import pandas as pd
 import torch
-import torch.nn as nn
-import torch.optim as optim
+from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision import transforms, models
-from sklearn.model_selection import train_test_split
-from collections import Counter
 from tqdm import tqdm
-import pandas as pd
 from chest_xray_dataset import ChestXrayDataset
 
 # Paths
-DATA_PATH = "D:/AI-Radiology-Assistant/data/raw/"
-metadata = pd.read_csv(os.path.join(DATA_PATH, "metadata.csv"))
-MODEL_PATH = "models/chest_xray_model.pth"
-os.makedirs("models", exist_ok=True)
+dataset_dir = "D:/AI-Radiology-Assistant/data/raw/"
+image_dir = os.path.join(dataset_dir, "images")
+metadata_path = os.path.join(dataset_dir, "metadata.csv")
 
-# Data Augmentation and Preprocessing
-train_transform = transforms.Compose([
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+# Load metadata
+metadata = pd.read_csv(metadata_path)
+
+# Debugging metadata loading
+print("Metadata type:", type(metadata))  # Should be <class 'pandas.core.frame.DataFrame'>
+print(metadata.head())  # Display the first few rows of metadata
+
+# Encode labels
+if 'encoded_label' not in metadata.columns:
+    label_mapping = {label: idx for idx, label in enumerate(metadata['finding'].unique())}
+    metadata['encoded_label'] = metadata['finding'].map(label_mapping)
+
+# Debug label mapping
+print("Label Mapping:", label_mapping)
+print("Sample Encoded Labels:", metadata[['finding', 'encoded_label']].head())
+
+# Filter out rare classes
+class_counts = metadata['encoded_label'].value_counts()
+filtered_classes = class_counts[class_counts >= 2].index  # Keep classes with at least 2 samples
+metadata = metadata[metadata['encoded_label'].isin(filtered_classes)]
+
+# Debug class distribution
+print("Filtered class distribution:", metadata['encoded_label'].value_counts())
+
+# Transforms
+train_transforms = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    transforms.ToTensor()
 ])
 
-val_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+# Dataset and DataLoader
+train_dataset = ChestXrayDataset(image_dir=image_dir, metadata=metadata, transform=train_transforms)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
-# Check and handle rare classes
-print("Original class distribution:")
-print(metadata['encoded_label'].value_counts())
-
-if metadata['encoded_label'].value_counts().min() < 2:
-    print("Some classes have less than 2 samples. Removing these classes...")
-    metadata = metadata[metadata['encoded_label'].map(metadata['encoded_label'].value_counts()) > 1]
-
-# Train-validation split
-print("\nFiltered class distribution:")
-print(metadata['encoded_label'].value_counts())
-
-if metadata['encoded_label'].value_counts().min() < 2:
-    print("Not enough samples for stratified split. Proceeding without stratification.")
-    train_data, val_data = train_test_split(metadata, test_size=0.2, random_state=42)
-else:
-    train_data, val_data = train_test_split(metadata, test_size=0.2, stratify=metadata['encoded_label'], random_state=42)
-
-# Datasets and DataLoaders
-train_dataset = ChestXrayDataset(train_data, DATA_PATH, train_transform)
-val_dataset = ChestXrayDataset(val_data, DATA_PATH, val_transform)
-
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
+# Debugging dataset
+print("Dataset initialized. Sample batch:")
+for inputs, labels in train_loader:
+    print("Inputs shape:", inputs.shape)
+    print("Labels:", labels)
+    break
 
 # Model setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = models.resnet18(pretrained=True)
-model.fc = nn.Linear(model.fc.in_features, len(metadata['encoded_label'].unique()))  # Adjust output layer
+model = models.resnet18(weights="IMAGENET1K_V1")  # Updated to new 'weights' argument
+num_features = model.fc.in_features
+model.fc = nn.Linear(num_features, len(label_mapping))  # Adjust final layer to match number of classes
 model = model.to(device)
 
+# Loss and optimizer
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Training loop
 num_epochs = 10
-best_val_loss = float("inf")
-
 for epoch in range(num_epochs):
-    print(f"Epoch {epoch+1}/{num_epochs}\n{'-'*10}")
-    
-    # Training phase
+    print(f"Epoch {epoch + 1}/{num_epochs}")
+    print("-" * 10)
     model.train()
-    train_loss, train_correct = 0.0, 0
+    
+    running_loss = 0.0
     for inputs, labels in tqdm(train_loader):
         inputs, labels = inputs.to(device), labels.to(device)
         
+        # Zero the parameter gradients
         optimizer.zero_grad()
+        
+        # Forward pass
         outputs = model(inputs)
         loss = criterion(outputs, labels)
+        
+        # Backward pass and optimization
         loss.backward()
         optimizer.step()
         
-        train_loss += loss.item() * inputs.size(0)
-        _, preds = torch.max(outputs, 1)
-        train_correct += torch.sum(preds == labels.data)
+        running_loss += loss.item()
     
-    train_loss /= len(train_loader.dataset)
-    train_acc = train_correct.double() / len(train_loader.dataset)
-    
-    # Validation phase
-    model.eval()
-    val_loss, val_correct = 0.0, 0
-    with torch.no_grad():
-        for inputs, labels in tqdm(val_loader):
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            
-            val_loss += loss.item() * inputs.size(0)
-            _, preds = torch.max(outputs, 1)
-            val_correct += torch.sum(preds == labels.data)
-    
-    val_loss /= len(val_loader.dataset)
-    val_acc = val_correct.double() / len(val_loader.dataset)
-    
-    print(f"Train Loss: {train_loss:.4f} Acc: {train_acc:.4f}")
-    print(f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
-    
-    # Save the best model
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        torch.save(model.state_dict(), MODEL_PATH)
-        print("Model saved to", MODEL_PATH)
+    epoch_loss = running_loss / len(train_loader)
+    print(f"Loss: {epoch_loss:.4f}")
+
+# Save the model
+model_save_path = "D:/AI-Radiology-Assistant/models/resnet18_chest_xray.pth"
+os.makedirs(os.path.dirname(model_save_path), exist_ok=True)
+torch.save(model.state_dict(), model_save_path)
+print(f"Model saved to {model_save_path}")
