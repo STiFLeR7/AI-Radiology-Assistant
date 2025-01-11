@@ -23,6 +23,13 @@ data_transform = transforms.Compose([
 # Load Dataset
 def load_dataset(metadata_path, image_dir, transform):
     metadata = pd.read_csv(metadata_path)
+
+    # Check if 'encoded_label' exists; if not, create it
+    if 'encoded_label' not in metadata.columns:
+        label_mapping = {label: idx for idx, label in enumerate(metadata['finding'].unique())}
+        metadata['encoded_label'] = metadata['finding'].map(label_mapping)
+        print("Label Mapping:", label_mapping)
+
     dataset = ChestXrayDataset(
         image_dir=image_dir,
         metadata=metadata,
@@ -36,18 +43,19 @@ def load_model(model_path, num_classes):
     from torchvision.models import resnet18
     model = resnet18(pretrained=False)
     model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+    
+    # Load model weights
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model.to(DEVICE)
     model.eval()
     return model
 
 # Evaluate Model
-def evaluate_model(model, dataloader, num_classes):
+def evaluate_model(model, dataloader, class_names):
     correct = 0
     total = 0
-    class_correct = [0] * num_classes
-    class_total = [0] * num_classes
-    class_names = dataloader.dataset.metadata['encoded_label'].unique()
+    class_correct = [0] * len(class_names)
+    class_total = [0] * len(class_names)
 
     with torch.no_grad():
         for inputs, labels in dataloader:
@@ -66,7 +74,7 @@ def evaluate_model(model, dataloader, num_classes):
 
     overall_accuracy = correct / total * 100
     class_accuracies = {class_names[i]: class_correct[i] / class_total[i] * 100
-                        for i in range(num_classes)}
+                        for i in range(len(class_names))}
 
     return overall_accuracy, class_accuracies
 
@@ -74,13 +82,13 @@ def evaluate_model(model, dataloader, num_classes):
 if __name__ == "__main__":
     # Load validation dataset
     val_loader, val_dataset = load_dataset(METADATA_PATH, IMAGE_DIR, data_transform)
-    num_classes = len(val_dataset.metadata['encoded_label'].unique())
+    class_names = val_dataset.metadata['finding'].unique()
 
     # Load trained model
-    model = load_model(MODEL_PATH, num_classes)
+    model = load_model(MODEL_PATH, len(class_names))
 
     # Evaluate the model
-    overall_accuracy, class_accuracies = evaluate_model(model, val_loader, num_classes)
+    overall_accuracy, class_accuracies = evaluate_model(model, val_loader, class_names)
 
     print(f"Overall Accuracy: {overall_accuracy:.2f}%")
     for class_name, acc in class_accuracies.items():
